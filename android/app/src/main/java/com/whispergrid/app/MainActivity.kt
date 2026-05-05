@@ -149,14 +149,29 @@ fun ChatScreen(
     var showPeerList by remember { mutableStateOf(false) }
     var showAISettings by remember { mutableStateOf(false) }
 
-    // Handle received messages
+    // Handle received messages with AI processing
     LaunchedEffect(receivedMessages) {
         receivedMessages.forEach { wireMessage ->
             if (messages.none { it.id == wireMessage.id }) {
+                // Process message through AI
+                val processed = aiProcessor.processMessage(wireMessage.content)
+
+                // Use translated text if available, otherwise original
+                val displayText = processed.translatedText ?: wireMessage.content
+
+                // Add warning if misinformation detected
+                val finalText = when (processed.misinformationCheck?.trustLevel) {
+                    com.whispergrid.app.ai.TrustLevel.SUSPICIOUS ->
+                        "⚠️ [Suspicious] $displayText"
+                    com.whispergrid.app.ai.TrustLevel.QUESTIONABLE ->
+                        "⚠️ [Verify] $displayText"
+                    else -> displayText
+                }
+
                 messages = messages + Message(
                     id = wireMessage.id,
                     sender = wireMessage.senderName,
-                    content = wireMessage.content,
+                    content = finalText,
                     timestamp = wireMessage.timestamp,
                     isFromMe = false
                 )
@@ -201,6 +216,20 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    // AI Settings button
+                    IconButton(
+                        onClick = { showAISettings = !showAISettings }
+                    ) {
+                        Icon(
+                            Icons.Default.Wifi,
+                            contentDescription = "AI Settings",
+                            tint = if (isOllamaAvailable)
+                                MaterialTheme.colorScheme.tertiary
+                            else
+                                MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
                     IconButton(onClick = { wifiDirectManager.startDiscovery() }) {
                         Icon(
                             Icons.Default.Refresh,
@@ -277,6 +306,22 @@ fun ChatScreen(
                             }
                         }
                     }
+                )
+            }
+
+// Add this new section:
+            if (showAISettings) {
+                AISettingsDialog(
+                    isOllamaAvailable = isOllamaAvailable,
+                    translationEnabled = translationEnabled,
+                    targetLanguage = aiProcessor.targetLanguage.collectAsState().value,
+                    onTranslationToggle = { enabled ->
+                        aiProcessor.setTranslationEnabled(enabled)
+                    },
+                    onLanguageChange = { language ->
+                        aiProcessor.setTargetLanguage(language)
+                    },
+                    onDismiss = { showAISettings = false }
                 )
             }
         }
@@ -474,4 +519,158 @@ fun MessageComposer(
 fun formatTime(timestamp: Long): String {
     val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
     return sdf.format(Date(timestamp))
+}
+@Composable
+fun AISettingsDialog(
+    isOllamaAvailable: Boolean,
+    translationEnabled: Boolean,
+    targetLanguage: String,
+    onTranslationToggle: (Boolean) -> Unit,
+    onLanguageChange: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    Icons.Default.Wifi,
+                    contentDescription = null,
+                    tint = if (isOllamaAvailable)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.error
+                )
+                Text("AI Settings")
+            }
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Ollama status
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Gemma AI Status:")
+                    Text(
+                        if (isOllamaAvailable) "Connected" else "Offline",
+                        color = if (isOllamaAvailable)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Divider()
+
+                // Translation toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Auto-translate messages",
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            "Translate incoming messages to your language",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = translationEnabled,
+                        onCheckedChange = onTranslationToggle,
+                        enabled = isOllamaAvailable
+                    )
+                }
+
+                // Language selection
+                if (translationEnabled) {
+                    Column {
+                        Text(
+                            "Translate to:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        val languages = listOf(
+                            "English", "Spanish", "French", "German", "Italian",
+                            "Portuguese", "Chinese", "Japanese", "Korean", "Arabic",
+                            "Hindi", "Russian", "Turkish", "Vietnamese", "Polish"
+                        )
+
+                        var expanded by remember { mutableStateOf(false) }
+
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(targetLanguage)
+                            Spacer(modifier = Modifier.weight(1f))
+                            Icon(
+                                if (expanded) Icons.Default.Refresh else Icons.Default.Send,
+                                contentDescription = null
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            languages.forEach { language ->
+                                DropdownMenuItem(
+                                    text = { Text(language) },
+                                    onClick = {
+                                        onLanguageChange(language)
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (!isOllamaAvailable) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                "Ollama Not Connected",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Text(
+                                "Make sure Ollama is running with Gemma 2 model.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
