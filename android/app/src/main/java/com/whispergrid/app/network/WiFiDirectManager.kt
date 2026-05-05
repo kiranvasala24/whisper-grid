@@ -1,5 +1,6 @@
 package com.whispergrid.app.network
 
+import android.net.wifi.p2p.WifiP2pInfo
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -22,6 +23,13 @@ class WiFiDirectManager(private val context: Context) {
     private val manager: WifiP2pManager by lazy {
         context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
     }
+    private val _connectionInfo = MutableStateFlow<WifiP2pInfo?>(null)
+    val connectionInfo: StateFlow<WifiP2pInfo?> = _connectionInfo.asStateFlow()
+
+    private var connectionInfoListener = WifiP2pManager.ConnectionInfoListener { info ->
+        _connectionInfo.value = info
+        Log.d(TAG, "Connection info: groupFormed=${info.groupFormed}, isOwner=${info.isGroupOwner}")
+    }
 
     private val channel: WifiP2pManager.Channel by lazy {
         manager.initialize(context, context.mainLooper, null)
@@ -42,10 +50,9 @@ class WiFiDirectManager(private val context: Context) {
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
-                    val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
-                    val isEnabled = state == WifiP2pManager.WIFI_P2P_STATE_ENABLED
-                    Log.d(TAG, "WiFi P2P state: $isEnabled")
+                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
+                    Log.d(TAG, "Connection state changed")
+                    manager.requestConnectionInfo(channel, connectionInfoListener)
                 }
 
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {

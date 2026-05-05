@@ -1,6 +1,7 @@
 package com.whispergrid.app
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -18,29 +19,44 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.whispergrid.app.network.ConnectionManager
+import com.whispergrid.app.network.MessageProtocol
 import com.whispergrid.app.network.PermissionsHelper
 import com.whispergrid.app.network.Peer
 import com.whispergrid.app.network.WiFiDirectManager
+import com.whispergrid.app.network.WireMessage
 import com.whispergrid.app.ui.theme.WhisperGridTheme
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
-import android.util.Log
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var wifiDirectManager: WiFiDirectManager
+    private lateinit var connectionManager: ConnectionManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         wifiDirectManager = WiFiDirectManager(this)
+        connectionManager = ConnectionManager()
+
+        // Handle connection events
+        lifecycleScope.launch {
+            wifiDirectManager.connectionInfo.collect { info ->
+                info?.let {
+                    connectionManager.handleP2pConnection(it)
+                }
+            }
+        }
 
         setContent {
             WhisperGridTheme {
-                MainScreen(wifiDirectManager)
+                MainScreen(wifiDirectManager, connectionManager)
             }
         }
     }
@@ -48,23 +64,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         wifiDirectManager.registerReceiver()
-    }
-    @OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
-    @Composable
-    fun MainScreen(wifiDirectManager: WiFiDirectManager) {
-        val permissionsState = rememberMultiplePermissionsState(
-            permissions = PermissionsHelper.getRequiredPermissions().toList()
-        )
-
-        // Try to request permissions on first launch
-        LaunchedEffect(Unit) {
-            if (!permissionsState.allPermissionsGranted) {
-                permissionsState.launchMultiplePermissionRequest()
-            }
-        }
-
-        // Always show the chat screen (skip permission check for now)
-        ChatScreen(wifiDirectManager)
     }
 
     override fun onPause() {
@@ -83,26 +82,23 @@ data class Message(
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun MainScreen(wifiDirectManager: WiFiDirectManager) {
+fun MainScreen(
+    wifiDirectManager: WiFiDirectManager,
+    connectionManager: ConnectionManager
+) {
     val permissionsState = rememberMultiplePermissionsState(
         permissions = PermissionsHelper.getRequiredPermissions().toList()
     )
 
+    // Try to request permissions on first launch
     LaunchedEffect(Unit) {
         if (!permissionsState.allPermissionsGranted) {
             permissionsState.launchMultiplePermissionRequest()
         }
     }
 
-    if (permissionsState.allPermissionsGranted) {
-        ChatScreen(wifiDirectManager)
-    } else {
-        PermissionRequestScreen(
-            onRequestPermissions = {
-                permissionsState.launchMultiplePermissionRequest()
-            }
-        )
-    }
+    // Always show the chat screen (skip permission check for now)
+    ChatScreen(wifiDirectManager, connectionManager)
 }
 
 @Composable
@@ -150,14 +146,34 @@ fun PermissionRequestScreen(onRequestPermissions: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(wifiDirectManager: WiFiDirectManager) {
+fun ChatScreen(
+    wifiDirectManager: WiFiDirectManager,
+    connectionManager: ConnectionManager
+) {
     var messages by remember { mutableStateOf(listOf<Message>()) }
     var messageText by remember { mutableStateOf("") }
 
     val peers by wifiDirectManager.peers.collectAsState()
     val isDiscovering by wifiDirectManager.isDiscovering.collectAsState()
+    val connectionState by connectionManager.connectionState.collectAsState()
+    val receivedMessages by connectionManager.receivedMessages.collectAsState()
 
     var showPeerList by remember { mutableStateOf(false) }
+
+    // Handle received messages
+    LaunchedEffect(receivedMessages) {
+        receivedMessages.forEach { wireMessage ->
+            if (messages.none { it.id == wireMessage.id }) {
+                messages = messages + Message(
+                    id = wireMessage.id,
+                    sender = wireMessage.senderName,
+                    content = wireMessage.content,
+                    timestamp = wireMessage.timestamp,
+                    isFromMe = false
+                )
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -166,10 +182,18 @@ fun ChatScreen(wifiDirectManager: WiFiDirectManager) {
                     Column {
                         Text("Whisper Grid", fontWeight = FontWeight.Bold)
                         Text(
-                            if (isDiscovering) "Discovering • ${peers.size} peers"
-                            else "Offline Mesh • ${peers.size} peers",
+                            when {
+                                connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
+                                    "Connected • ${peers.size} peers"
+                                isDiscovering -> "Discovering • ${peers.size} peers"
+                                else -> "Offline Mesh • ${peers.size} peers"
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = when {
+                                connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
+                                    MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                     }
                 },
@@ -207,11 +231,16 @@ fun ChatScreen(wifiDirectManager: WiFiDirectManager) {
                 onTextChange = { messageText = it },
                 onSend = {
                     if (messageText.isNotBlank()) {
+                        // Add to local messages
                         messages = messages + Message(
                             sender = "You",
                             content = messageText,
                             isFromMe = true
                         )
+
+                        // Send over network
+                        connectionManager.sendTextMessage(messageText)
+
                         messageText = ""
                     }
                 }
