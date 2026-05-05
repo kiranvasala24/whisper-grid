@@ -1,7 +1,6 @@
 package com.whispergrid.app
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,11 +22,10 @@ import androidx.lifecycle.lifecycleScope
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.whispergrid.app.network.ConnectionManager
-import com.whispergrid.app.network.MessageProtocol
 import com.whispergrid.app.network.PermissionsHelper
 import com.whispergrid.app.network.Peer
+import com.whispergrid.app.network.RoutingManager
 import com.whispergrid.app.network.WiFiDirectManager
-import com.whispergrid.app.network.WireMessage
 import com.whispergrid.app.ui.theme.WhisperGridTheme
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -37,6 +35,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var wifiDirectManager: WiFiDirectManager
     private lateinit var connectionManager: ConnectionManager
+    private lateinit var routingManager: RoutingManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,18 +44,36 @@ class MainActivity : ComponentActivity() {
         wifiDirectManager = WiFiDirectManager(this)
         connectionManager = ConnectionManager()
 
+        // Initialize routing manager
+        val deviceId = connectionManager.getDeviceId()
+        val deviceName = connectionManager.getDeviceName()
+        routingManager = RoutingManager(deviceId, deviceName)
+
+        // Connect routing manager to connection manager
+        connectionManager.setRoutingManager(routingManager)
+
         // Handle connection events
         lifecycleScope.launch {
             wifiDirectManager.connectionInfo.collect { info ->
                 info?.let {
                     connectionManager.handleP2pConnection(it)
+
+                    // Add to routing table when connected
+                    if (it.groupFormed && it.groupOwnerAddress != null) {
+                        val peerId = it.groupOwnerAddress.hostAddress ?: "unknown"
+                        routingManager.addDirectPeer(
+                            peerId = peerId,
+                            peerName = "Peer_${peerId.takeLast(4)}",
+                            connectionManager = connectionManager
+                        )
+                    }
                 }
             }
         }
 
         setContent {
             WhisperGridTheme {
-                MainScreen(wifiDirectManager, connectionManager)
+                MainScreen(wifiDirectManager, connectionManager, routingManager)
             }
         }
     }
@@ -84,71 +101,28 @@ data class Message(
 @Composable
 fun MainScreen(
     wifiDirectManager: WiFiDirectManager,
-    connectionManager: ConnectionManager
+    connectionManager: ConnectionManager,
+    routingManager: RoutingManager
 ) {
     val permissionsState = rememberMultiplePermissionsState(
         permissions = PermissionsHelper.getRequiredPermissions().toList()
     )
 
-    // Try to request permissions on first launch
     LaunchedEffect(Unit) {
         if (!permissionsState.allPermissionsGranted) {
             permissionsState.launchMultiplePermissionRequest()
         }
     }
 
-    // Always show the chat screen (skip permission check for now)
-    ChatScreen(wifiDirectManager, connectionManager)
-}
-
-@Composable
-fun PermissionRequestScreen(onRequestPermissions: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            Icons.Default.Wifi,
-            contentDescription = null,
-            modifier = Modifier.size(64.dp),
-            tint = MaterialTheme.colorScheme.primary
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Text(
-            "Permissions Needed",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            "Whisper Grid needs WiFi and Location permissions to discover nearby devices and create mesh networks.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Button(
-            onClick = onRequestPermissions,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Grant Permissions")
-        }
-    }
+    ChatScreen(wifiDirectManager, connectionManager, routingManager)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     wifiDirectManager: WiFiDirectManager,
-    connectionManager: ConnectionManager
+    connectionManager: ConnectionManager,
+    routingManager: RoutingManager
 ) {
     var messages by remember { mutableStateOf(listOf<Message>()) }
     var messageText by remember { mutableStateOf("") }
@@ -157,6 +131,7 @@ fun ChatScreen(
     val isDiscovering by wifiDirectManager.isDiscovering.collectAsState()
     val connectionState by connectionManager.connectionState.collectAsState()
     val receivedMessages by connectionManager.receivedMessages.collectAsState()
+    val networkStats by routingManager.totalNodes.collectAsState()
 
     var showPeerList by remember { mutableStateOf(false) }
 
@@ -184,9 +159,9 @@ fun ChatScreen(
                         Text(
                             when {
                                 connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
-                                    "Connected • ${peers.size} peers"
+                                    "Mesh Network • $networkStats nodes"
                                 isDiscovering -> "Discovering • ${peers.size} peers"
-                                else -> "Offline Mesh • ${peers.size} peers"
+                                else -> "Offline • ${peers.size} nearby"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = when {
@@ -231,14 +206,12 @@ fun ChatScreen(
                 onTextChange = { messageText = it },
                 onSend = {
                     if (messageText.isNotBlank()) {
-                        // Add to local messages
                         messages = messages + Message(
                             sender = "You",
                             content = messageText,
                             isFromMe = true
                         )
 
-                        // Send over network
                         connectionManager.sendTextMessage(messageText)
 
                         messageText = ""

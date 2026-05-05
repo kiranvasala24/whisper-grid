@@ -17,7 +17,7 @@ import java.net.Socket
 class ConnectionManager {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
+    private var routingManager: RoutingManager? = null
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
@@ -128,7 +128,27 @@ class ConnectionManager {
         val message = MessageProtocol.deserialize(data)
         if (message != null) {
             Log.d(TAG, "Received message: ${message.type} from ${message.senderName}")
-            _receivedMessages.value = _receivedMessages.value + message
+
+            // Process through routing manager if available
+            routingManager?.let { router ->
+                when (val result = router.processMessage(message)) {
+                    is RoutingManager.ProcessResult.Deliver -> {
+                        // Message is for us - deliver it
+                        _receivedMessages.value = _receivedMessages.value + result.message
+                    }
+                    is RoutingManager.ProcessResult.Forwarded -> {
+                        // Message was forwarded to next hop
+                        Log.d(TAG, "Message forwarded")
+                    }
+                    is RoutingManager.ProcessResult.NoRoute -> {
+                        // No route found
+                        Log.w(TAG, "No route to destination")
+                    }
+                }
+            } ?: run {
+                // No routing manager - deliver directly
+                _receivedMessages.value = _receivedMessages.value + message
+            }
         }
     }
 
@@ -188,6 +208,9 @@ class ConnectionManager {
     }
 
     fun getDeviceId() = deviceId
+    fun setRoutingManager(manager: RoutingManager) {
+        routingManager = manager
+    }
     fun getDeviceName() = deviceName
 }
 

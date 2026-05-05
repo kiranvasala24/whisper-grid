@@ -61,6 +61,7 @@ class WiFiDirectManager(private val context: Context) {
 
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
                     Log.d(TAG, "Connection state changed")
+                    manager.requestConnectionInfo(channel, connectionInfoListener)
                 }
 
                 WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
