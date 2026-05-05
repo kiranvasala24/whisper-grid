@@ -29,6 +29,9 @@ import com.whispergrid.app.network.WiFiDirectManager
 import com.whispergrid.app.ui.theme.WhisperGridTheme
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import com.whispergrid.app.ai.AIMessageProcessor
+import com.whispergrid.app.ai.OllamaService
+import com.whispergrid.app.ai.TrustLevel
 import java.util.*
 
 class MainActivity : ComponentActivity() {
@@ -36,6 +39,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var wifiDirectManager: WiFiDirectManager
     private lateinit var connectionManager: ConnectionManager
     private lateinit var routingManager: RoutingManager
+    private lateinit var ollamaService: OllamaService
+    private lateinit var aiProcessor: AIMessageProcessor
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,6 +53,10 @@ class MainActivity : ComponentActivity() {
         val deviceId = connectionManager.getDeviceId()
         val deviceName = connectionManager.getDeviceName()
         routingManager = RoutingManager(deviceId, deviceName)
+
+        // Initialize AI services
+        ollamaService = OllamaService()
+        aiProcessor = AIMessageProcessor(ollamaService)
 
         // Connect routing manager to connection manager
         connectionManager.setRoutingManager(routingManager)
@@ -73,7 +82,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             WhisperGridTheme {
-                MainScreen(wifiDirectManager, connectionManager, routingManager)
+                MainScreen(wifiDirectManager, connectionManager, routingManager, aiProcessor)
             }
         }
     }
@@ -102,7 +111,8 @@ data class Message(
 fun MainScreen(
     wifiDirectManager: WiFiDirectManager,
     connectionManager: ConnectionManager,
-    routingManager: RoutingManager
+    routingManager: RoutingManager,
+    aiProcessor: AIMessageProcessor
 ) {
     val permissionsState = rememberMultiplePermissionsState(
         permissions = PermissionsHelper.getRequiredPermissions().toList()
@@ -114,7 +124,7 @@ fun MainScreen(
         }
     }
 
-    ChatScreen(wifiDirectManager, connectionManager, routingManager)
+    ChatScreen(wifiDirectManager, connectionManager, routingManager, aiProcessor)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -122,7 +132,8 @@ fun MainScreen(
 fun ChatScreen(
     wifiDirectManager: WiFiDirectManager,
     connectionManager: ConnectionManager,
-    routingManager: RoutingManager
+    routingManager: RoutingManager,
+    aiProcessor: AIMessageProcessor
 ) {
     var messages by remember { mutableStateOf(listOf<Message>()) }
     var messageText by remember { mutableStateOf("") }
@@ -132,8 +143,11 @@ fun ChatScreen(
     val connectionState by connectionManager.connectionState.collectAsState()
     val receivedMessages by connectionManager.receivedMessages.collectAsState()
     val networkStats by routingManager.totalNodes.collectAsState()
+    val isOllamaAvailable by aiProcessor.isOllamaAvailable.collectAsState()
+    val translationEnabled by aiProcessor.translationEnabled.collectAsState()
 
     var showPeerList by remember { mutableStateOf(false) }
+    var showAISettings by remember { mutableStateOf(false) }
 
     // Handle received messages
     LaunchedEffect(receivedMessages) {
@@ -156,20 +170,34 @@ fun ChatScreen(
                 title = {
                     Column {
                         Text("Whisper Grid", fontWeight = FontWeight.Bold)
-                        Text(
-                            when {
-                                connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
-                                    "Mesh Network • $networkStats nodes"
-                                isDiscovering -> "Discovering • ${peers.size} peers"
-                                else -> "Offline • ${peers.size} nearby"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = when {
-                                connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
-                                    MaterialTheme.colorScheme.primary
-                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                when {
+                                    connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
+                                        "Mesh Network • $networkStats nodes"
+                                    isDiscovering -> "Discovering • ${peers.size} peers"
+                                    else -> "Offline • ${peers.size} nearby"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = when {
+                                    connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
+                                        MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+
+                            if (isOllamaAvailable) {
+                                Text(
+                                    "• AI",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
-                        )
+                        }
                     }
                 },
                 actions = {
