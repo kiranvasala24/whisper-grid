@@ -4,26 +4,300 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.whispergrid.app.network.PermissionsHelper
+import com.whispergrid.app.network.Peer
+import com.whispergrid.app.network.WiFiDirectManager
 import com.whispergrid.app.ui.theme.WhisperGridTheme
+import java.text.SimpleDateFormat
+import java.util.*
+import android.util.Log
 
 class MainActivity : ComponentActivity() {
+
+    private lateinit var wifiDirectManager: WiFiDirectManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        wifiDirectManager = WiFiDirectManager(this)
+
         setContent {
             WhisperGridTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Greeting(
-                        name = "Android",
-                        modifier = Modifier.padding(innerPadding)
+                MainScreen(wifiDirectManager)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        wifiDirectManager.registerReceiver()
+    }
+    @OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
+    @Composable
+    fun MainScreen(wifiDirectManager: WiFiDirectManager) {
+        val permissionsState = rememberMultiplePermissionsState(
+            permissions = PermissionsHelper.getRequiredPermissions().toList()
+        )
+
+        // Try to request permissions on first launch
+        LaunchedEffect(Unit) {
+            if (!permissionsState.allPermissionsGranted) {
+                permissionsState.launchMultiplePermissionRequest()
+            }
+        }
+
+        // Always show the chat screen (skip permission check for now)
+        ChatScreen(wifiDirectManager)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        wifiDirectManager.unregisterReceiver()
+    }
+}
+
+data class Message(
+    val id: String = UUID.randomUUID().toString(),
+    val sender: String,
+    val content: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val isFromMe: Boolean = false
+)
+
+@OptIn(ExperimentalPermissionsApi::class)
+@Composable
+fun MainScreen(wifiDirectManager: WiFiDirectManager) {
+    val permissionsState = rememberMultiplePermissionsState(
+        permissions = PermissionsHelper.getRequiredPermissions().toList()
+    )
+
+    LaunchedEffect(Unit) {
+        if (!permissionsState.allPermissionsGranted) {
+            permissionsState.launchMultiplePermissionRequest()
+        }
+    }
+
+    if (permissionsState.allPermissionsGranted) {
+        ChatScreen(wifiDirectManager)
+    } else {
+        PermissionRequestScreen(
+            onRequestPermissions = {
+                permissionsState.launchMultiplePermissionRequest()
+            }
+        )
+    }
+}
+
+@Composable
+fun PermissionRequestScreen(onRequestPermissions: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.Default.Wifi,
+            contentDescription = null,
+            modifier = Modifier.size(64.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text(
+            "Permissions Needed",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            "Whisper Grid needs WiFi and Location permissions to discover nearby devices and create mesh networks.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Button(
+            onClick = onRequestPermissions,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Grant Permissions")
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChatScreen(wifiDirectManager: WiFiDirectManager) {
+    var messages by remember { mutableStateOf(listOf<Message>()) }
+    var messageText by remember { mutableStateOf("") }
+
+    val peers by wifiDirectManager.peers.collectAsState()
+    val isDiscovering by wifiDirectManager.isDiscovering.collectAsState()
+
+    var showPeerList by remember { mutableStateOf(false) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("Whisper Grid", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (isDiscovering) "Discovering • ${peers.size} peers"
+                            else "Offline Mesh • ${peers.size} peers",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { wifiDirectManager.startDiscovery() }) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "Discover Peers",
+                            tint = if (isDiscovering)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    IconButton(onClick = { showPeerList = !showPeerList }) {
+                        Badge(
+                            containerColor = if (peers.isNotEmpty())
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Text("${peers.size}")
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            )
+        },
+        bottomBar = {
+            MessageComposer(
+                text = messageText,
+                onTextChange = { messageText = it },
+                onSend = {
+                    if (messageText.isNotBlank()) {
+                        messages = messages + Message(
+                            sender = "You",
+                            content = messageText,
+                            isFromMe = true
+                        )
+                        messageText = ""
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+                    .padding(horizontal = 8.dp),
+                reverseLayout = true
+            ) {
+                items(messages.reversed()) { message ->
+                    MessageBubble(message)
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+
+            if (showPeerList) {
+                PeerListSheet(
+                    peers = peers,
+                    onDismiss = { showPeerList = false },
+                    onConnect = { peer ->
+                        wifiDirectManager.connect(peer) { success ->
+                            if (success) {
+                                messages = messages + Message(
+                                    sender = "System",
+                                    content = "Connecting to ${peer.deviceName}...",
+                                    isFromMe = false
+                                )
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun PeerListSheet(
+    peers: List<Peer>,
+    onDismiss: () -> Unit,
+    onConnect: (Peer) -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Nearby Devices",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+
+                TextButton(onClick = onDismiss) {
+                    Text("Close")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (peers.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "No devices found. Tap refresh to discover peers.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            } else {
+                LazyColumn {
+                    items(peers) { peer ->
+                        PeerItem(peer = peer, onClick = { onConnect(peer) })
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                 }
             }
         }
@@ -31,17 +305,143 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
+fun PeerItem(
+    peer: Peer,
+    onClick: () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Wifi,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    peer.deviceName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    peer.status.name,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Text(
+                "Connect",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
 }
 
-@Preview(showBackground = true)
 @Composable
-fun GreetingPreview() {
-    WhisperGridTheme {
-        Greeting("Android")
+fun MessageBubble(message: Message) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (message.isFromMe) Arrangement.End else Arrangement.Start
+    ) {
+        Card(
+            modifier = Modifier.widthIn(max = 280.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (message.isFromMe)
+                    MaterialTheme.colorScheme.primaryContainer
+                else
+                    MaterialTheme.colorScheme.secondaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                if (!message.isFromMe) {
+                    Text(
+                        message.sender,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                Text(
+                    message.content,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    formatTime(message.timestamp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
+}
+
+@Composable
+fun MessageComposer(
+    text: String,
+    onTextChange: (String) -> Unit,
+    onSend: () -> Unit
+) {
+    Surface(
+        shadowElevation = 8.dp,
+        tonalElevation = 3.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = onTextChange,
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Type a message...") },
+                maxLines = 3,
+                singleLine = false
+            )
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            IconButton(
+                onClick = {
+                    if (text.isNotBlank()) {
+                        onSend()
+                    }
+                },
+                enabled = text.isNotBlank()
+            ) {
+                Icon(
+                    Icons.Default.Send,
+                    contentDescription = "Send",
+                    tint = if (text.isNotBlank())
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+fun formatTime(timestamp: Long): String {
+    val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+    return sdf.format(Date(timestamp))
 }
