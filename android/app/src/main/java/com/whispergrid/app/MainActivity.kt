@@ -17,10 +17,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.whispergrid.app.ai.AIMessageProcessor
+import com.whispergrid.app.ai.OllamaService
+import com.whispergrid.app.ai.TrustLevel
 import com.whispergrid.app.network.ConnectionManager
 import com.whispergrid.app.network.PermissionsHelper
 import com.whispergrid.app.network.Peer
@@ -29,9 +33,6 @@ import com.whispergrid.app.network.WiFiDirectManager
 import com.whispergrid.app.ui.theme.WhisperGridTheme
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
-import com.whispergrid.app.ai.AIMessageProcessor
-import com.whispergrid.app.ai.OllamaService
-import com.whispergrid.app.ai.TrustLevel
 import java.util.*
 
 class MainActivity : ComponentActivity() {
@@ -161,10 +162,8 @@ fun ChatScreen(
 
                 // Add warning if misinformation detected
                 val finalText = when (processed.misinformationCheck?.trustLevel) {
-                    com.whispergrid.app.ai.TrustLevel.SUSPICIOUS ->
-                        "⚠️ [Suspicious] $displayText"
-                    com.whispergrid.app.ai.TrustLevel.QUESTIONABLE ->
-                        "⚠️ [Verify] $displayText"
+                    TrustLevel.SUSPICIOUS -> "⚠️ [Suspicious] $displayText"
+                    TrustLevel.QUESTIONABLE -> "⚠️ [Verify] $displayText"
                     else -> displayText
                 }
 
@@ -176,6 +175,53 @@ fun ChatScreen(
                     isFromMe = false
                 )
             }
+        }
+    }
+
+    // Add system messages for connection changes
+    LaunchedEffect(connectionState) {
+        when (connectionState) {
+            is com.whispergrid.app.network.ConnectionState.Connected -> {
+                val state = connectionState as com.whispergrid.app.network.ConnectionState.Connected
+                messages = messages + Message(
+                    sender = "System",
+                    content = "✓ Connected to mesh network (${state.peerAddress})",
+                    isFromMe = false,
+                    timestamp = System.currentTimeMillis()
+                )
+            }
+            is com.whispergrid.app.network.ConnectionState.Error -> {
+                val state = connectionState as com.whispergrid.app.network.ConnectionState.Error
+                messages = messages + Message(
+                    sender = "System",
+                    content = "⚠ Connection error: ${state.message}",
+                    isFromMe = false,
+                    timestamp = System.currentTimeMillis()
+                )
+            }
+            is com.whispergrid.app.network.ConnectionState.Disconnected -> {
+                if (messages.isNotEmpty()) {
+                    messages = messages + Message(
+                        sender = "System",
+                        content = "○ Disconnected from network",
+                        isFromMe = false,
+                        timestamp = System.currentTimeMillis()
+                    )
+                }
+            }
+            else -> { /* Ignore other states */ }
+        }
+    }
+
+    // Add system message when AI connects
+    LaunchedEffect(isOllamaAvailable) {
+        if (isOllamaAvailable && messages.isNotEmpty()) {
+            messages = messages + Message(
+                sender = "System",
+                content = "🤖 Gemma AI connected - Translation enabled",
+                isFromMe = false,
+                timestamp = System.currentTimeMillis()
+            )
         }
     }
 
@@ -230,15 +276,23 @@ fun ChatScreen(
                         )
                     }
 
-                    IconButton(onClick = { wifiDirectManager.startDiscovery() }) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = "Discover Peers",
-                            tint = if (isDiscovering)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurface
-                        )
+                    IconButton(
+                        onClick = { wifiDirectManager.startDiscovery() },
+                        enabled = !isDiscovering
+                    ) {
+                        if (isDiscovering) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Discover Peers",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
 
                     IconButton(onClick = { showPeerList = !showPeerList }) {
@@ -278,16 +332,92 @@ fun ChatScreen(
         }
     ) { paddingValues ->
         Box(modifier = Modifier.fillMaxSize()) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(horizontal = 8.dp),
-                reverseLayout = true
-            ) {
-                items(messages.reversed()) { message ->
-                    MessageBubble(message)
+            if (messages.isEmpty()) {
+                // Empty state
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues)
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        Icons.Default.Wifi,
+                        contentDescription = null,
+                        modifier = Modifier.size(80.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        "Welcome to Whisper Grid",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
                     Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        when {
+                            connectionState is com.whispergrid.app.network.ConnectionState.Connected ->
+                                "Connected! Send a message to start chatting."
+                            peers.isEmpty() ->
+                                "Tap refresh to discover nearby devices."
+                            else ->
+                                "Tap the badge above to connect to peers."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    // Quick action hints
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "Quick Start:",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "• Tap ↻ to discover devices",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "• Tap badge to see peers",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "• Tap WiFi icon for AI settings",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues)
+                        .padding(horizontal = 8.dp),
+                    reverseLayout = true
+                ) {
+                    items(messages.reversed()) { message ->
+                        MessageBubble(message)
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                 }
             }
 
@@ -309,7 +439,6 @@ fun ChatScreen(
                 )
             }
 
-// Add this new section:
             if (showAISettings) {
                 AISettingsDialog(
                     isOllamaAvailable = isOllamaAvailable,
@@ -426,43 +555,70 @@ fun PeerItem(
 
 @Composable
 fun MessageBubble(message: Message) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (message.isFromMe) Arrangement.End else Arrangement.Start
-    ) {
-        Card(
-            modifier = Modifier.widthIn(max = 280.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (message.isFromMe)
-                    MaterialTheme.colorScheme.primaryContainer
-                else
-                    MaterialTheme.colorScheme.secondaryContainer
-            )
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                if (!message.isFromMe) {
-                    Text(
-                        message.sender,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                }
+    val isSystem = message.sender == "System"
 
+    if (isSystem) {
+        // System message - centered
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
                 Text(
                     message.content,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                Text(
-                    formatTime(message.timestamp),
-                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+    } else {
+        // Regular message - left/right aligned
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = if (message.isFromMe) Arrangement.End else Arrangement.Start
+        ) {
+            Card(
+                modifier = Modifier.widthIn(max = 280.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (message.isFromMe)
+                        MaterialTheme.colorScheme.primaryContainer
+                    else
+                        MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    if (!message.isFromMe) {
+                        Text(
+                            message.sender,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+
+                    Text(
+                        message.content,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Text(
+                        formatTime(message.timestamp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }
@@ -516,10 +672,6 @@ fun MessageComposer(
     }
 }
 
-fun formatTime(timestamp: Long): String {
-    val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
-    return sdf.format(Date(timestamp))
-}
 @Composable
 fun AISettingsDialog(
     isOllamaAvailable: Boolean,
@@ -568,7 +720,7 @@ fun AISettingsDialog(
                     )
                 }
 
-                Divider()
+                HorizontalDivider()
 
                 // Translation toggle
                 Row(
@@ -673,4 +825,9 @@ fun AISettingsDialog(
             }
         }
     )
+}
+
+fun formatTime(timestamp: Long): String {
+    val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+    return sdf.format(Date(timestamp))
 }
